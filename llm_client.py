@@ -1,4 +1,6 @@
 import os
+import json
+import re
 from dotenv import load_dotenv
 from openai import OpenAI
 from prompt_templates import RESUME_JD_ANALYSIS_PROMPT
@@ -9,38 +11,68 @@ load_dotenv()
 
 def get_client() -> OpenAI:
     """
-    创建 OpenAI 客户端。
-
-    默认读取：
-    - OPENAI_API_KEY
-    - OPENAI_BASE_URL，可选
-
-    如果使用 OpenAI 官方 API，可以不设置 OPENAI_BASE_URL。
-    如果使用 DeepSeek、通义千问等兼容接口，需要设置对应的 base_url。
+    创建 DeepSeek / OpenAI 兼容客户端。
     """
     api_key = os.getenv("OPENAI_API_KEY")
     base_url = os.getenv("OPENAI_BASE_URL")
 
     if not api_key:
-        raise ValueError("未检测到 OPENAI_API_KEY，请在 .env 文件中配置。")
+        raise ValueError("未检测到 OPENAI_API_KEY，请检查 .env 文件。")
 
-    if base_url:
-        return OpenAI(api_key=api_key, base_url=base_url)
+    if not base_url:
+        raise ValueError("未检测到 OPENAI_BASE_URL。使用 DeepSeek 时请设置为 https://api.deepseek.com")
 
-    return OpenAI(api_key=api_key)
+    return OpenAI(
+        api_key=api_key,
+        base_url=base_url
+    )
 
 
-def analyze_resume_jd(resume_text: str, jd_text: str) -> str:
+def extract_json_from_text(text: str) -> dict:
     """
-    调用大语言模型，分析简历与岗位 JD 的匹配情况。
+    尽量从模型输出中解析 JSON。
+    即使模型误加了 ```json，也能尽量处理。
+    """
+    if not text:
+        return {"raw_result": ""}
+
+    cleaned = text.strip()
+
+    cleaned = cleaned.replace("```json", "")
+    cleaned = cleaned.replace("```", "")
+    cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+    if match:
+        json_text = match.group(0)
+        try:
+            return json.loads(json_text)
+        except json.JSONDecodeError:
+            pass
+
+    return {
+        "raw_result": text
+    }
+
+
+def analyze_resume_jd(resume_text: str, jd_text: str) -> dict:
+    """
+    调用 DeepSeek API，分析简历与岗位 JD 的匹配情况。
+    返回结构化 dict。
     """
     client = get_client()
 
-    model_name = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    model_name = os.getenv("OPENAI_MODEL", "deepseek-chat")
 
-    prompt = RESUME_JD_ANALYSIS_PROMPT.format(
-        resume_text=resume_text[:8000],
-        jd_text=jd_text[:6000]
+    prompt = (
+        RESUME_JD_ANALYSIS_PROMPT
+        .replace("{resume_text}", resume_text[:8000])
+        .replace("{jd_text}", jd_text[:6000])
     )
 
     response = client.chat.completions.create(
@@ -48,14 +80,15 @@ def analyze_resume_jd(resume_text: str, jd_text: str) -> str:
         messages=[
             {
                 "role": "system",
-                "content": "你是一名严谨、真实、具体的 AI 应用开发岗位求职辅导专家。"
+                "content": "你是一名严谨、真实、具体的 AI 应用开发岗位求职辅导专家。你必须严格按照用户要求输出 JSON。"
             },
             {
                 "role": "user",
                 "content": prompt
             }
         ],
-        temperature=0.4
+        temperature=0.3
     )
 
-    return response.choices[0].message.content
+    content = response.choices[0].message.content
+    return extract_json_from_text(content)
