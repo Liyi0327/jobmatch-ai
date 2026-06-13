@@ -68,6 +68,224 @@ def init_db():
     conn.close()
 
 
+def init_resume_db():
+    """
+    初始化历史简历表。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS resumes (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT NOT NULL,
+            file_type TEXT,
+            resume_text TEXT NOT NULL,
+            char_count INTEGER,
+            is_active INTEGER DEFAULT 0,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def add_resume(
+    file_name: str,
+    file_type: str,
+    resume_text: str,
+    set_active: bool = True
+) -> int:
+    """
+    新增一份历史简历。
+    如果 set_active=True，则同时把它设为当前使用的简历。
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    char_count = len(resume_text)
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    if set_active:
+        cursor.execute(
+            """
+            UPDATE resumes
+            SET is_active = 0
+            """
+        )
+
+    cursor.execute(
+        """
+        INSERT INTO resumes (
+            file_name, file_type, resume_text, char_count,
+            is_active, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            file_name,
+            file_type,
+            resume_text,
+            char_count,
+            1 if set_active else 0,
+            now,
+            now
+        )
+    )
+
+    conn.commit()
+    resume_id = cursor.lastrowid
+    conn.close()
+
+    return resume_id
+
+
+def get_all_resumes() -> List[Dict]:
+    """
+    获取所有历史简历。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM resumes
+        ORDER BY updated_at DESC
+        """
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def get_resume_by_id(resume_id: int) -> Optional[Dict]:
+    """
+    根据 ID 获取一份简历。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM resumes
+        WHERE id = ?
+        """,
+        (resume_id,)
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def get_active_resume() -> Optional[Dict]:
+    """
+    获取当前正在使用的简历。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM resumes
+        WHERE is_active = 1
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def set_active_resume(resume_id: int):
+    """
+    设置某份历史简历为当前使用简历。
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE resumes
+        SET is_active = 0
+        """
+    )
+
+    cursor.execute(
+        """
+        UPDATE resumes
+        SET is_active = 1, updated_at = ?
+        WHERE id = ?
+        """,
+        (now, resume_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def clear_active_resume():
+    """
+    取消当前使用的简历，但不删除历史记录。
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE resumes
+        SET is_active = 0, updated_at = ?
+        WHERE is_active = 1
+        """,
+        (now,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def delete_resume(resume_id: int):
+    """
+    删除一份历史简历。
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM resumes
+        WHERE id = ?
+        """,
+        (resume_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
 def add_job(
     job_name: str,
     jd_text: str,
@@ -221,6 +439,62 @@ def update_job_match_result(job_id: int, match_score: int, match_level: str):
         WHERE id = ?
         """,
         (match_score, match_level, now, job_id)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def replace_job_info(
+    job_id: int,
+    job_name: str,
+    company: str,
+    city: str,
+    source: str,
+    job_url: str,
+    jd_text: str,
+    note: str
+):
+    """
+    用新的岗位信息覆盖已有岗位。
+
+    注意：
+    1. 保留原来的投递状态 status；
+    2. 因为 JD 内容可能变化，所以清空旧的匹配度和匹配等级；
+    3. 不删除分析历史，只更新岗位本身。
+    """
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        UPDATE jobs
+        SET
+            job_name = ?,
+            company = ?,
+            city = ?,
+            source = ?,
+            job_url = ?,
+            jd_text = ?,
+            note = ?,
+            match_score = NULL,
+            match_level = NULL,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (
+            job_name,
+            company,
+            city,
+            source,
+            job_url,
+            jd_text,
+            note,
+            now,
+            job_id
+        )
     )
 
     conn.commit()

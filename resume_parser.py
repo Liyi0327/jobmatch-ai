@@ -1,30 +1,66 @@
 import fitz
+from docx import Document
 
 
 def extract_text_from_pdf(uploaded_file) -> str:
     """
-    从上传的 PDF 简历中提取文本。
-
-    参数：
-        uploaded_file: Streamlit 上传的 PDF 文件对象
-
-    返回：
-        str: PDF 中提取出的文本内容
+    从 PDF 简历中提取文本。
     """
-    try:
-        file_bytes = uploaded_file.read()
-        doc = fitz.open(stream=file_bytes, filetype="pdf")
+    uploaded_file.seek(0)
+    file_bytes = uploaded_file.read()
 
-        text_list = []
+    text = ""
 
-        for page_num, page in enumerate(doc, start=1):
+    with fitz.open(stream=file_bytes, filetype="pdf") as doc:
+        for page in doc:
             page_text = page.get_text()
             if page_text:
-                text_list.append(page_text)
+                text += page_text + "\n"
 
-        doc.close()
+    return text.strip()
 
-        return "\n".join(text_list).strip()
 
-    except Exception as e:
-        raise RuntimeError(f"PDF 文本提取失败：{e}")
+def extract_text_from_docx(uploaded_file) -> str:
+    """
+    从 Word .docx 简历中提取文本。
+    """
+    uploaded_file.seek(0)
+
+    document = Document(uploaded_file)
+
+    paragraphs = []
+
+    for paragraph in document.paragraphs:
+        content = paragraph.text.strip()
+        if content:
+            paragraphs.append(content)
+
+    for table in document.tables:
+        for row in table.rows:
+            row_text = []
+            for cell in row.cells:
+                cell_text = cell.text.strip()
+                if cell_text:
+                    row_text.append(cell_text)
+            if row_text:
+                paragraphs.append(" | ".join(row_text))
+
+    return "\n".join(paragraphs).strip()
+
+
+def extract_text_from_resume(uploaded_file) -> str:
+    """
+    根据文件类型自动解析简历。
+    当前支持：
+    1. PDF
+    2. DOCX
+    """
+    file_name = uploaded_file.name.lower()
+
+    if file_name.endswith(".pdf"):
+        return extract_text_from_pdf(uploaded_file)
+
+    if file_name.endswith(".docx"):
+        return extract_text_from_docx(uploaded_file)
+
+    raise ValueError("当前仅支持 PDF 或 DOCX 格式简历。")

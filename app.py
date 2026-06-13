@@ -1,18 +1,29 @@
 import re
+from difflib import SequenceMatcher
+
 import pandas as pd
 import streamlit as st
 
-from resume_parser import extract_text_from_pdf
-from llm_client import analyze_resume_jd
+from resume_parser import extract_text_from_resume
+from llm_client import analyze_resume_jd, extract_job_from_jd
 
 from db import (
     init_db,
+    init_resume_db,
+    add_resume,
+    get_all_resumes,
+    get_resume_by_id,
+    get_active_resume,
+    set_active_resume,
+    clear_active_resume,
+    delete_resume,
     add_job,
     get_all_jobs,
     get_job_by_id,
     update_job_status,
     update_job_note,
     update_job_match_result,
+    replace_job_info,
     delete_job,
     save_analysis_result,
     get_analysis_history,
@@ -28,6 +39,7 @@ st.set_page_config(
 )
 
 init_db()
+init_resume_db()
 
 
 STATUS_OPTIONS = [
@@ -41,17 +53,63 @@ STATUS_OPTIONS = [
 ]
 
 
+if "resume_id" not in st.session_state:
+    st.session_state.resume_id = None
+
 if "resume_text" not in st.session_state:
     st.session_state.resume_text = ""
 
 if "resume_file_name" not in st.session_state:
     st.session_state.resume_file_name = ""
 
+if "resume_char_count" not in st.session_state:
+    st.session_state.resume_char_count = 0
+
+if "resume_uploader_version" not in st.session_state:
+    st.session_state.resume_uploader_version = 0
+
+if "last_uploaded_resume_key" not in st.session_state:
+    st.session_state.last_uploaded_resume_key = ""
+
+if "show_resume_history" not in st.session_state:
+    st.session_state.show_resume_history = False
+
 if "single_result" not in st.session_state:
     st.session_state.single_result = None
 
 if "multi_results" not in st.session_state:
     st.session_state.multi_results = []
+
+if "pending_import_job" not in st.session_state:
+    st.session_state.pending_import_job = None
+
+if "duplicate_candidates" not in st.session_state:
+    st.session_state.duplicate_candidates = []
+
+if "last_imported_job_id" not in st.session_state:
+    st.session_state.last_imported_job_id = None
+
+if "last_imported_job_name" not in st.session_state:
+    st.session_state.last_imported_job_name = ""
+
+if "import_feedback" not in st.session_state:
+    st.session_state.import_feedback = ""
+
+
+def sync_active_resume_from_db():
+    """
+    页面刷新时，从数据库中同步当前正在使用的简历。
+    """
+    if st.session_state.resume_text:
+        return
+
+    active_resume = get_active_resume()
+
+    if active_resume:
+        st.session_state.resume_id = active_resume.get("id")
+        st.session_state.resume_text = active_resume.get("resume_text", "")
+        st.session_state.resume_file_name = active_resume.get("file_name", "")
+        st.session_state.resume_char_count = active_resume.get("char_count", 0)
 
 
 def get_score(value) -> int:
@@ -77,6 +135,140 @@ def get_match_level(score: int) -> str:
     if score >= 60:
         return "基础相关"
     return "需明显补充"
+
+
+def normalize_text(text: str) -> str:
+    if not text:
+        return ""
+
+    text = text.lower()
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，。、“”‘’：:；;（）()\[\]【】/\\|_-]", "", text)
+    return text
+
+
+def similarity(a: str, b: str) -> float:
+    a = normalize_text(a)
+    b = normalize_text(b)
+
+    if not a or not b:
+        return 0.0
+
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def find_duplicate_jobs(job_name: str, company: str, jd_text: str):
+    jobs = get_all_jobs()
+    duplicates = []
+
+    new_job_name_norm = normalize_text(job_name)
+    new_company_norm = normalize_text(company)
+    new_jd_norm = normalize_text(jd_text)[:1500]
+
+    for job in jobs:
+        old_job_name = job.get("job_name") or ""
+        old_company = job.get("company") or ""
+        old_jd = job.get("jd_text") or ""
+
+        old_job_name_norm = normalize_text(old_job_name)
+        old_company_norm = normalize_text(old_company)
+        old_jd_norm = normalize_text(old_jd)[:1500]
+
+        exact_same_company_and_name = (
+            new_company_norm
+            and old_company_norm
+            and new_company_norm == old_company_norm
+            and new_job_name_norm == old_job_name_norm
+        )
+
+        same_company_name_similar = (
+            new_company_norm
+            and old_company_norm
+            and new_company_norm == old_company_norm
+            and similarity(job_name, old_job_name) >= 0.75
+        )
+
+        jd_highly_similar = (
+            new_jd_norm
+            and old_jd_norm
+            and similarity(new_jd_norm, old_jd_norm) >= 0.85
+        )
+
+        if exact_same_company_and_name or same_company_name_similar or jd_highly_similar:
+            duplicates.append(
+                {
+                    "id": job.get("id"),
+                    "job_name": old_job_name,
+                    "company": old_company,
+                    "city": job.get("city"),
+                    "status": job.get("status"),
+                    "match_score": job.get("match_score"),
+                    "updated_at": job.get("updated_at"),
+                    "reason": (
+                        "公司和岗位名相同"
+                        if exact_same_company_and_name
+                        else "公司相同且岗位名相似"
+                        if same_company_name_similar
+                        else "JD 内容高度相似"
+                    )
+                }
+            )
+
+    return duplicates
+
+
+def build_cleaned_jd_from_parsed(parsed: dict) -> str:
+    responsibilities = parsed.get("responsibilities", [])
+    requirements = parsed.get("requirements", [])
+    bonus_points = parsed.get("bonus_points", [])
+    keywords = parsed.get("keywords", [])
+
+    cleaned_jd_parts = []
+
+    cleaned_jd_parts.append(f"岗位名称：{parsed.get('job_name', '')}")
+    cleaned_jd_parts.append(f"公司名称：{parsed.get('company', '')}")
+    cleaned_jd_parts.append(f"城市：{parsed.get('city', '')}")
+    cleaned_jd_parts.append("")
+
+    cleaned_jd_parts.append("岗位职责：")
+    for item in responsibilities:
+        cleaned_jd_parts.append(f"- {item}")
+
+    cleaned_jd_parts.append("")
+    cleaned_jd_parts.append("岗位要求：")
+    for item in requirements:
+        cleaned_jd_parts.append(f"- {item}")
+
+    if bonus_points:
+        cleaned_jd_parts.append("")
+        cleaned_jd_parts.append("加分项：")
+        for item in bonus_points:
+            cleaned_jd_parts.append(f"- {item}")
+
+    if keywords:
+        cleaned_jd_parts.append("")
+        cleaned_jd_parts.append("岗位关键词：")
+        cleaned_jd_parts.append("、".join(keywords))
+
+    return parsed.get("cleaned_jd") or "\n".join(cleaned_jd_parts)
+
+
+def save_imported_job(payload: dict) -> int:
+    job_id = add_job(
+        job_name=payload.get("job_name", "").strip(),
+        company=payload.get("company", "").strip(),
+        city=payload.get("city", "").strip(),
+        source=payload.get("source", "").strip(),
+        job_url=payload.get("job_url", "").strip(),
+        jd_text=payload.get("jd_text", "").strip(),
+        status=payload.get("status", "待分析"),
+        note=payload.get("note", "").strip()
+    )
+
+    st.session_state.last_imported_job_id = job_id
+    st.session_state.last_imported_job_name = payload.get("job_name", "")
+
+    return job_id
 
 
 def render_tags(items):
@@ -430,42 +622,382 @@ def analyze_job_and_save(resume_text: str, job: dict):
 def render_resume_section():
     st.markdown("## ① 我的简历")
 
+    st.caption("上传一份 PDF 或 Word 简历，后续所有岗位分析都会默认使用当前选中的简历。")
+
     uploaded_file = st.file_uploader(
-        "上传一份 PDF 简历，后续所有岗位分析都会使用这份简历",
-        type=["pdf"],
-        key="main_resume"
+        "上传简历文件",
+        type=["pdf", "docx"],
+        accept_multiple_files=False,
+        key=f"main_resume_{st.session_state.resume_uploader_version}"
     )
 
     if uploaded_file is not None:
-        try:
-            resume_text = extract_text_from_pdf(uploaded_file)
+        upload_key = f"{uploaded_file.name}_{uploaded_file.size}_{st.session_state.resume_uploader_version}"
 
-            if resume_text.strip():
-                st.session_state.resume_text = resume_text
-                st.session_state.resume_file_name = uploaded_file.name
-                st.success(f"简历解析成功：{uploaded_file.name}")
-            else:
-                st.error("没有从 PDF 中解析出文本，请确认简历不是纯图片格式。")
+        if upload_key != st.session_state.last_uploaded_resume_key:
+            try:
+                resume_text = extract_text_from_resume(uploaded_file)
 
-        except Exception as e:
-            st.error(f"简历解析失败：{e}")
+                if resume_text.strip():
+                    file_name = uploaded_file.name
+                    file_type = file_name.split(".")[-1].lower()
+
+                    resume_id = add_resume(
+                        file_name=file_name,
+                        file_type=file_type,
+                        resume_text=resume_text,
+                        set_active=True
+                    )
+
+                    st.session_state.resume_id = resume_id
+                    st.session_state.resume_text = resume_text
+                    st.session_state.resume_file_name = file_name
+                    st.session_state.resume_char_count = len(resume_text)
+                    st.session_state.last_uploaded_resume_key = upload_key
+
+                    st.success(f"当前简历：{file_name}，已解析并设为当前使用简历。")
+
+                else:
+                    st.error("没有从简历中解析出文本，请确认文件不是纯图片扫描版。")
+
+            except Exception as e:
+                st.error(f"简历解析失败：{e}")
 
     if st.session_state.resume_text:
-        with st.expander("查看当前简历解析文本"):
-            st.text_area(
-                "简历文本",
-                value=st.session_state.resume_text,
-                height=220
-            )
+        st.info(
+            f"当前使用的简历：{st.session_state.get('resume_file_name', '')}。"
+            f"后续岗位分析都会使用这份简历，解析文本约 "
+            f"{st.session_state.get('resume_char_count', len(st.session_state.resume_text))} 字。"
+        )
+
+        c1, c2, c3 = st.columns([1, 1, 1])
+
+        with c1:
+            if st.button("历史简历", use_container_width=True):
+                st.session_state.show_resume_history = not st.session_state.show_resume_history
+
+        with c2:
+            with st.expander("查看当前简历文本"):
+                st.text_area(
+                    "当前简历解析文本",
+                    value=st.session_state.resume_text,
+                    height=220
+                )
+
+        with c3:
+            if st.button("移除当前简历", use_container_width=True):
+                clear_active_resume()
+
+                st.session_state.resume_id = None
+                st.session_state.resume_text = ""
+                st.session_state.resume_file_name = ""
+                st.session_state.resume_char_count = 0
+                st.session_state.resume_uploader_version += 1
+                st.session_state.last_uploaded_resume_key = ""
+
+                st.success("当前简历已移除，但历史记录仍然保留。")
+                st.rerun()
+
     else:
-        st.info("请先上传简历。上传后，后续分析无需重复上传。")
+        st.info("请先上传简历。上传成功后，后续分析无需重复上传。")
+
+        if st.button("历史简历", use_container_width=True):
+            st.session_state.show_resume_history = not st.session_state.show_resume_history
+
+    if st.session_state.show_resume_history:
+        st.markdown("### 历史简历")
+
+        resumes = get_all_resumes()
+
+        if not resumes:
+            st.info("暂无历史简历。")
+            return
+
+        for resume in resumes:
+            resume_id = resume.get("id")
+            file_name = resume.get("file_name", "")
+            file_type = resume.get("file_type", "")
+            char_count = resume.get("char_count", 0)
+            created_at = resume.get("created_at", "")
+            is_active = resume.get("is_active") == 1
+
+            row_col1, row_col2, row_col3 = st.columns([5, 1.2, 1.2])
+
+            with row_col1:
+                if is_active:
+                    st.markdown(f"**{file_name}**  `当前使用`")
+                else:
+                    st.markdown(f"**{file_name}**")
+
+                st.caption(f"{file_type}｜约 {char_count} 字｜上传时间：{created_at}")
+
+            with row_col2:
+                if is_active:
+                    st.button(
+                        "当前使用",
+                        key=f"active_resume_{resume_id}",
+                        disabled=True,
+                        use_container_width=True
+                    )
+                else:
+                    if st.button(
+                        "设为当前",
+                        key=f"set_resume_{resume_id}",
+                        use_container_width=True
+                    ):
+                        selected_resume = get_resume_by_id(resume_id)
+
+                        if selected_resume:
+                            set_active_resume(resume_id)
+
+                            st.session_state.resume_id = selected_resume.get("id")
+                            st.session_state.resume_text = selected_resume.get("resume_text", "")
+                            st.session_state.resume_file_name = selected_resume.get("file_name", "")
+                            st.session_state.resume_char_count = selected_resume.get("char_count", 0)
+                            st.session_state.resume_uploader_version += 1
+                            st.session_state.last_uploaded_resume_key = ""
+
+                            st.success("已设为当前使用简历。")
+                            st.rerun()
+
+            with row_col3:
+                if st.button(
+                    "删除",
+                    key=f"delete_resume_{resume_id}",
+                    use_container_width=True
+                ):
+                    is_current_resume = (
+                        st.session_state.resume_id == resume_id
+                    )
+
+                    delete_resume(resume_id)
+
+                    if is_current_resume:
+                        st.session_state.resume_id = None
+                        st.session_state.resume_text = ""
+                        st.session_state.resume_file_name = ""
+                        st.session_state.resume_char_count = 0
+                        st.session_state.resume_uploader_version += 1
+                        st.session_state.last_uploaded_resume_key = ""
+
+                    st.success("历史简历已删除。")
+                    st.rerun()
+
+            with st.expander(f"查看解析文本：{file_name}"):
+                st.text_area(
+                    "历史简历解析文本",
+                    value=resume.get("resume_text", ""),
+                    height=180,
+                    key=f"resume_text_{resume_id}"
+                )
+
+            st.divider()
 
 
 def render_job_pool_section():
     st.markdown("## ② 我的岗位池")
 
-    with st.expander("新增岗位到岗位池", expanded=False):
-        with st.form("add_job_form"):
+    if st.session_state.import_feedback:
+        st.success(st.session_state.import_feedback)
+        st.session_state.import_feedback = ""
+
+    with st.expander("🤖 AI 智能导入岗位 JD", expanded=True):
+        st.markdown(
+            """
+            将从 BOSS、实习僧、公司官网等平台复制来的完整岗位 JD 粘贴到这里。
+            系统会自动提取岗位名称、公司、城市、职责、要求、关键词，并判断投递优先级。
+
+            点击按钮后：
+            - 如果岗位池中没有重复岗位，系统会自动保存；
+            - 如果检测到疑似重复岗位，系统会提示你选择处理方式。
+            """
+        )
+
+        raw_jd = st.text_area(
+            "粘贴完整岗位 JD",
+            height=240,
+            key="raw_jd_for_import",
+            placeholder="请粘贴完整岗位描述，包括岗位名称、公司、职责、要求、加分项等。"
+        )
+
+        if st.button("🤖 AI 解析并保存岗位", type="primary", use_container_width=True):
+            if not raw_jd.strip():
+                st.warning("请先粘贴岗位 JD。")
+            else:
+                with st.spinner("正在解析岗位 JD，并检查是否重复，请稍等..."):
+                    try:
+                        parsed = extract_job_from_jd(raw_jd)
+
+                        if "raw_result" in parsed:
+                            st.warning("模型没有返回标准 JSON，以下展示原始结果：")
+                            st.markdown(parsed["raw_result"])
+                        else:
+                            cleaned_jd = build_cleaned_jd_from_parsed(parsed)
+
+                            keywords = parsed.get("keywords", [])
+                            priority = parsed.get("priority", "")
+                            priority_reason = parsed.get("priority_reason", "")
+                            source_guess = parsed.get("source_guess", "")
+
+                            note = f"""AI 导入结果：
+投递优先级：{priority}
+优先级理由：{priority_reason}
+岗位关键词：{"、".join(keywords)}
+"""
+
+                            payload = {
+                                "job_name": parsed.get("job_name", "").strip() or "未命名岗位",
+                                "company": parsed.get("company", "").strip(),
+                                "city": parsed.get("city", "").strip(),
+                                "source": source_guess.strip(),
+                                "job_url": "",
+                                "jd_text": cleaned_jd.strip(),
+                                "status": "待分析",
+                                "note": note.strip()
+                            }
+
+                            duplicates = find_duplicate_jobs(
+                                job_name=payload["job_name"],
+                                company=payload["company"],
+                                jd_text=payload["jd_text"]
+                            )
+
+                            if duplicates:
+                                st.session_state.pending_import_job = payload
+                                st.session_state.duplicate_candidates = duplicates
+                                st.warning("检测到疑似重复岗位，暂未自动保存。请在下方选择处理方式。")
+                            else:
+                                job_id = save_imported_job(payload)
+                                st.session_state.import_feedback = (
+                                    f"岗位已自动保存到岗位池，岗位 ID：{job_id}。"
+                                    f"AI 投递优先级判断：{priority}。{priority_reason}"
+                                )
+                                st.rerun()
+
+                    except Exception as e:
+                        st.error(f"岗位 JD 解析失败：{e}")
+
+    if st.session_state.pending_import_job:
+        st.warning("存在一个待确认的岗位导入结果。")
+
+        st.markdown("### 疑似重复岗位")
+
+        duplicates = st.session_state.duplicate_candidates
+
+        duplicate_table = []
+
+        for item in duplicates:
+            duplicate_table.append(
+                {
+                    "ID": item.get("id"),
+                    "岗位名称": item.get("job_name"),
+                    "公司": item.get("company"),
+                    "城市": item.get("city"),
+                    "状态": item.get("status"),
+                    "匹配度": item.get("match_score"),
+                    "更新时间": item.get("updated_at"),
+                    "重复原因": item.get("reason")
+                }
+            )
+
+        st.dataframe(pd.DataFrame(duplicate_table), use_container_width=True)
+
+        with st.expander("查看本次准备导入的岗位信息", expanded=True):
+            pending = st.session_state.pending_import_job
+            st.markdown(f"**岗位名称：** {pending.get('job_name')}")
+            st.markdown(f"**公司：** {pending.get('company') or '未填写'}")
+            st.markdown(f"**城市：** {pending.get('city') or '未填写'}")
+            st.markdown("**备注：**")
+            st.text(pending.get("note", ""))
+            st.markdown("**整理后的 JD：**")
+            st.text_area(
+                "本次准备保存的 JD",
+                value=pending.get("jd_text", ""),
+                height=180
+            )
+
+        st.markdown("### 请选择处理方式")
+
+        duplicate_options = {
+            f"{item.get('id')}｜{item.get('job_name')}｜{item.get('company') or '未填写公司'}｜{item.get('reason')}": item.get("id")
+            for item in duplicates
+        }
+
+        selected_duplicate_label = st.selectbox(
+            "选择要覆盖 / 替换的已有岗位",
+            list(duplicate_options.keys())
+        )
+
+        selected_duplicate_id = duplicate_options[selected_duplicate_label]
+
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            if st.button("覆盖选中的已有岗位", type="primary", use_container_width=True):
+                pending = st.session_state.pending_import_job
+
+                replace_job_info(
+                    job_id=selected_duplicate_id,
+                    job_name=pending.get("job_name", ""),
+                    company=pending.get("company", ""),
+                    city=pending.get("city", ""),
+                    source=pending.get("source", ""),
+                    job_url=pending.get("job_url", ""),
+                    jd_text=pending.get("jd_text", ""),
+                    note=pending.get("note", "")
+                )
+
+                st.session_state.last_imported_job_id = selected_duplicate_id
+                st.session_state.last_imported_job_name = pending.get("job_name", "")
+
+                st.session_state.pending_import_job = None
+                st.session_state.duplicate_candidates = []
+                st.session_state.import_feedback = f"已覆盖已有岗位，岗位 ID：{selected_duplicate_id}。旧匹配度已清空，可重新分析。"
+
+                st.rerun()
+
+        with c2:
+            if st.button("仍然新增到岗位池", use_container_width=True):
+                job_id = save_imported_job(st.session_state.pending_import_job)
+
+                st.session_state.pending_import_job = None
+                st.session_state.duplicate_candidates = []
+                st.session_state.import_feedback = f"已仍然新增该岗位，岗位 ID：{job_id}。"
+
+                st.rerun()
+
+        with c3:
+            if st.button("放弃本次导入", use_container_width=True):
+                st.session_state.pending_import_job = None
+                st.session_state.duplicate_candidates = []
+                st.session_state.import_feedback = "已放弃本次导入。"
+
+                st.rerun()
+
+    if st.session_state.last_imported_job_id:
+        st.success(
+            f"最近保存岗位：{st.session_state.last_imported_job_name}，可在下方选择该岗位进行分析。"
+        )
+
+        if st.session_state.resume_text:
+            if st.button("立即分析最近保存的岗位", use_container_width=True):
+                job = get_job_by_id(st.session_state.last_imported_job_id)
+
+                if job:
+                    with st.spinner(f"正在分析岗位：{job.get('job_name')}"):
+                        result = analyze_job_and_save(st.session_state.resume_text, job)
+
+                    st.session_state.single_result = {
+                        "job": job,
+                        "result": result
+                    }
+                    st.session_state.multi_results = []
+                    st.success("分析完成，结果已保存。")
+        else:
+            st.info("上传简历后，可以直接分析最近保存的岗位。")
+
+    with st.expander("手动新增岗位到岗位池", expanded=False):
+        with st.form("manual_add_job_form"):
             c1, c2 = st.columns(2)
 
             with c1:
@@ -478,8 +1010,8 @@ def render_job_pool_section():
                 job_url = st.text_input("岗位链接")
                 status = st.selectbox("当前状态", STATUS_OPTIONS, index=0)
 
-            jd_text = st.text_area("岗位 JD *", height=220)
-            note = st.text_area("备注", height=80)
+            jd_text = st.text_area("岗位 JD *", height=240)
+            note = st.text_area("备注", height=120)
 
             submitted = st.form_submit_button("保存岗位", use_container_width=True)
 
@@ -580,7 +1112,7 @@ def render_analysis_section(jobs):
     st.markdown("## ③ 选择岗位进行 AI 分析")
 
     if not st.session_state.resume_text:
-        st.warning("请先在上方上传简历。")
+        st.warning("请先在上方上传或选择当前使用的简历。")
         return
 
     if not jobs:
@@ -694,6 +1226,7 @@ def render_result_section():
         result = st.session_state.single_result["result"]
 
         st.markdown(f"### 当前分析岗位：{job.get('job_name')}｜{job.get('company') or '未填写公司'}")
+        st.caption(f"当前使用简历：{st.session_state.get('resume_file_name', '')}")
         render_single_result(result, job_id=job.get("id"))
 
     elif st.session_state.multi_results:
@@ -704,6 +1237,7 @@ def render_result_section():
         )
 
         st.markdown("### 多岗位匹配度对比结果")
+        st.caption(f"当前使用简历：{st.session_state.get('resume_file_name', '')}")
 
         if sorted_results:
             best = sorted_results[0]
@@ -861,6 +1395,9 @@ def render_history_section():
         st.dataframe(pd.DataFrame(table_data), use_container_width=True)
 
 
+sync_active_resume_from_db()
+
+
 st.title("🎯 JobMatch AI：AI求职工作台")
 
 st.markdown(
@@ -868,10 +1405,12 @@ st.markdown(
     这是一个面向 **AI 应用开发实习求职** 的一页式求职工作台。
 
     你可以在同一个页面完成：
-    - 上传简历
-    - 添加岗位
+    - 上传和管理多份历史简历
+    - 选择当前使用简历
+    - AI 智能导入岗位 JD
+    - 自动查重并保存岗位
+    - 判断投递优先级
     - 选择岗位分析
-    - 查看匹配结果
     - 更新投递状态
     - 下载分析报告
     - 查看求职进度
@@ -894,16 +1433,23 @@ with st.sidebar:
 
     st.markdown(
         """
-        **当前版本：v4-workbench**
+        **当前版本：v5-jd-intake**
 
         产品逻辑：
-        1. 上传简历  
-        2. 添加岗位  
-        3. 选择岗位分析  
-        4. 保存结果与状态  
-        5. 查看求职进度  
+        1. 管理历史简历  
+        2. 选择当前简历  
+        3. 粘贴 JD  
+        4. AI 解析岗位  
+        5. 自动查重保存  
+        6. 选择岗位分析  
+        7. 更新状态与导出报告  
         """
     )
+
+    if st.session_state.resume_text:
+        st.info(f"当前简历：{st.session_state.get('resume_file_name', '')}")
+    else:
+        st.warning("当前未选择简历")
 
     st.warning("请勿上传包含敏感隐私信息的简历到公开部署环境。")
 
@@ -937,10 +1483,15 @@ st.markdown(
     ### 项目说明
 
     本项目是一个 AI 应用开发方向的求职作品，主要展示：
-    - PDF 简历解析能力
+    - PDF / Word 简历解析能力
+    - 历史简历管理能力
+    - 当前简历选择能力
     - 大语言模型 API 调用能力
     - Prompt Engineering 能力
     - Streamlit 一页式工作台开发能力
+    - JD 智能导入与结构化抽取能力
+    - 岗位自动查重能力
+    - 投递优先级判断能力
     - SQLite 数据持久化能力
     - 岗位信息 CRUD 能力
     - 求职状态管理能力

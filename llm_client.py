@@ -3,7 +3,11 @@ import json
 import re
 from dotenv import load_dotenv
 from openai import OpenAI
-from prompt_templates import RESUME_JD_ANALYSIS_PROMPT
+
+from prompt_templates import (
+    RESUME_JD_ANALYSIS_PROMPT,
+    JOB_JD_EXTRACTION_PROMPT
+)
 
 
 load_dotenv()
@@ -88,6 +92,38 @@ def analyze_resume_jd(resume_text: str, jd_text: str) -> dict:
             }
         ],
         temperature=0.3
+    )
+
+    content = response.choices[0].message.content
+    return extract_json_from_text(content)
+
+
+def extract_job_from_jd(raw_jd: str) -> dict:
+    """
+    调用 DeepSeek API，从原始岗位 JD 中提取结构化岗位信息。
+    """
+    client = get_client()
+
+    model_name = os.getenv("OPENAI_MODEL", "deepseek-chat")
+
+    prompt = JOB_JD_EXTRACTION_PROMPT.replace(
+        "{raw_jd}",
+        raw_jd[:8000]
+    )
+
+    response = client.chat.completions.create(
+        model=model_name,
+        messages=[
+            {
+                "role": "system",
+                "content": "你是一名严谨的岗位 JD 信息抽取助手，必须严格输出 JSON。"
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        temperature=0.2
     )
 
     content = response.choices[0].message.content
