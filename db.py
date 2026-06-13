@@ -659,3 +659,247 @@ def search_jobs(keyword: str = "", status: str = "") -> List[Dict]:
         ]
 
     return jobs
+
+def init_interview_db():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS interviews (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id INTEGER NOT NULL,
+            round_name TEXT DEFAULT '',
+            interview_time TEXT DEFAULT '',
+            interview_type TEXT DEFAULT '',
+            interview_content TEXT DEFAULT '',
+            feedback TEXT DEFAULT '',
+            result TEXT DEFAULT '待反馈',
+            next_step TEXT DEFAULT '',
+            note TEXT DEFAULT '',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def add_interview_record(
+    job_id,
+    round_name,
+    interview_time,
+    interview_type,
+    interview_content,
+    feedback,
+    result,
+    next_step,
+    note
+):
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        INSERT INTO interviews (
+            job_id,
+            round_name,
+            interview_time,
+            interview_type,
+            interview_content,
+            feedback,
+            result,
+            next_step,
+            note,
+            created_at,
+            updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            round_name,
+            interview_time,
+            interview_type,
+            interview_content,
+            feedback,
+            result,
+            next_step,
+            note,
+            now,
+            now
+        )
+    )
+
+    interview_id = cursor.lastrowid
+
+    conn.commit()
+    conn.close()
+
+    return interview_id
+
+
+def get_interviews_by_job(job_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM interviews
+        WHERE job_id = ?
+        ORDER BY created_at DESC
+        """,
+        (job_id,)
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def get_latest_interview_by_job(job_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT *
+        FROM interviews
+        WHERE job_id = ?
+        ORDER BY created_at DESC
+        LIMIT 1
+        """,
+        (job_id,)
+    )
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        return dict(row)
+
+    return None
+
+
+def get_all_interviews():
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        SELECT interviews.*, jobs.job_name, jobs.company, jobs.city, jobs.status
+        FROM interviews
+        LEFT JOIN jobs ON interviews.job_id = jobs.id
+        ORDER BY interviews.created_at DESC
+        """
+    )
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    return [dict(row) for row in rows]
+
+
+def delete_interview_record(interview_id):
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    cursor.execute(
+        """
+        DELETE FROM interviews
+        WHERE id = ?
+        """,
+        (interview_id,)
+    )
+
+    conn.commit()
+    conn.close()
+
+
+def clear_demo_data():
+    """
+    清空演示数据：
+    - 删除演示简历
+    - 删除演示岗位
+    - 删除演示岗位对应的分析记录
+    - 删除演示岗位对应的面试记录，如果 interviews 表存在
+    """
+    conn = get_connection()
+    cursor = conn.cursor()
+
+    def table_exists(table_name):
+        cursor.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            """,
+            (table_name,)
+        )
+        return cursor.fetchone() is not None
+
+    cursor.execute(
+        """
+        SELECT id
+        FROM jobs
+        WHERE job_name LIKE '[演示]%'
+           OR note LIKE '%[DEMO_DATA]%'
+        """
+    )
+
+    job_rows = cursor.fetchall()
+    job_ids = [row["id"] for row in job_rows]
+
+    if job_ids:
+        placeholders = ",".join(["?"] * len(job_ids))
+
+        if table_exists("analysis_history"):
+            cursor.execute(
+                f"""
+                DELETE FROM analysis_history
+                WHERE job_id IN ({placeholders})
+                """,
+                job_ids
+            )
+
+        if table_exists("analysis_results"):
+            cursor.execute(
+                f"""
+                DELETE FROM analysis_results
+                WHERE job_id IN ({placeholders})
+                """,
+                job_ids
+            )
+
+        if table_exists("interviews"):
+            cursor.execute(
+                f"""
+                DELETE FROM interviews
+                WHERE job_id IN ({placeholders})
+                """,
+                job_ids
+            )
+
+        cursor.execute(
+            f"""
+            DELETE FROM jobs
+            WHERE id IN ({placeholders})
+            """,
+            job_ids
+        )
+
+    cursor.execute(
+        """
+        DELETE FROM resumes
+        WHERE file_name LIKE '[演示]%'
+        """
+    )
+
+    conn.commit()
+    conn.close()

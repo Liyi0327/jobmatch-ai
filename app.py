@@ -11,6 +11,7 @@ from llm_client import analyze_resume_jd, extract_job_from_jd
 from db import (
     init_db,
     init_resume_db,
+    init_interview_db,
     add_resume,
     get_all_resumes,
     get_resume_by_id,
@@ -29,7 +30,13 @@ from db import (
     save_analysis_result,
     get_analysis_history,
     get_dashboard_stats,
-    search_jobs
+    search_jobs,
+    add_interview_record,
+    get_interviews_by_job,
+    get_latest_interview_by_job,
+    get_all_interviews,
+    delete_interview_record,
+    clear_demo_data
 )
 
 
@@ -45,6 +52,7 @@ st.set_page_config(
 
 init_db()
 init_resume_db()
+init_interview_db()
 
 
 STATUS_OPTIONS = [
@@ -153,6 +161,295 @@ def get_match_level(score: int) -> str:
     if score >= 60:
         return "基础相关"
     return "需明显补充"
+
+def build_demo_resume_text():
+    return """
+李明
+AI 应用开发实习生｜示例简历
+
+教育背景：
+某某大学｜计算机科学与技术｜本科
+主修课程：机器学习、深度学习、自然语言处理、数据库系统、Python 程序设计
+
+技能能力：
+- 熟悉 Python 编程，能够使用 Streamlit、FastAPI 构建基础 Web 应用
+- 了解大模型 API 调用流程，熟悉 Prompt 设计和结构化输出
+- 了解 RAG 基本流程，包括文档解析、向量检索、问答生成
+- 熟悉 PyTorch 基础，理解神经网络训练流程
+- 熟悉 SQLite、Pandas 等常用数据处理工具
+
+项目经历：
+JobMatch AI｜AI 求职岗位匹配系统
+- 使用 Streamlit 构建求职工作台，实现简历上传、岗位 JD 解析、岗位匹配分析和求职进度管理
+- 调用大模型 API 生成岗位匹配度、简历优化建议和模拟面试问题
+- 使用 SQLite 存储简历、岗位、分析记录和求职状态
+- 支持岗位库、求职看板、投递流程管理等功能
+
+RAG 智能问答 Demo
+- 实现文档上传、文本切分、向量检索和答案生成流程
+- 使用 Prompt 模板约束回答格式，提升问答稳定性
+
+求职方向：
+AI 应用开发实习生、大模型应用开发实习生、RAG 应用开发实习生
+"""
+
+
+def build_demo_analysis_result(score, summary, position_keywords):
+    return {
+        "match_score": score,
+        "summary": summary,
+        "position_keywords": position_keywords,
+        "resume_keywords": [
+            "Python",
+            "Streamlit",
+            "SQLite",
+            "大模型 API",
+            "Prompt 设计",
+            "RAG",
+            "PyTorch"
+        ],
+        "strengths": [
+            "具备 Python 应用开发基础，能够完成从页面到数据存储的完整功能闭环。",
+            "有大模型 API 调用和 Prompt 设计经验，适合 AI 应用开发类岗位。",
+            "项目中包含简历解析、岗位匹配、结构化分析和求职流程管理，业务场景完整。"
+        ],
+        "weaknesses": [
+            "工程部署经验仍需加强，可以补充 FastAPI、Docker 或云部署相关实践。",
+            "如果目标岗位偏算法，需要进一步加强深度学习模型训练和评估经验。",
+            "RAG 项目可以继续补充向量数据库、召回评估和多轮问答能力。"
+        ],
+        "resume_suggestions": [
+            {
+                "target": "项目经历",
+                "suggestion": "突出项目的完整业务闭环，而不仅是调用大模型。",
+                "resume_expression": "独立完成 AI 求职岗位匹配系统，覆盖简历解析、JD 结构化提取、岗位匹配分析、简历优化建议生成和求职进度管理。"
+            },
+            {
+                "target": "技术栈",
+                "suggestion": "将 Streamlit、SQLite、大模型 API、Prompt 设计等关键词集中呈现。",
+                "resume_expression": "熟悉 Python、Streamlit、SQLite 和大模型 API 调用，能够构建轻量级 AI 应用原型。"
+            }
+        ],
+        "project_suggestion": {
+            "name": "RAG 岗位知识库问答系统",
+            "reason": "该项目可以进一步增强候选人在大模型应用开发方向的匹配度。",
+            "features": [
+                "岗位 JD 文档上传与解析",
+                "岗位知识库构建",
+                "向量检索",
+                "基于大模型的问答生成"
+            ],
+            "tech_stack": [
+                "Python",
+                "Streamlit",
+                "Embedding",
+                "Vector DB",
+                "LLM API"
+            ],
+            "resume_expression": "构建 RAG 岗位知识库问答系统，实现文档解析、向量检索和基于大模型的答案生成。"
+        },
+        "interview_questions": [
+            {
+                "type": "项目问题",
+                "question": "你这个 JobMatch AI 项目中，岗位 JD 是如何被结构化解析的？"
+            },
+            {
+                "type": "技术问题",
+                "question": "你如何保证大模型返回的是稳定的 JSON 格式？"
+            },
+            {
+                "type": "产品问题",
+                "question": "这个系统相比普通简历优化工具，核心差异在哪里？"
+            }
+        ],
+        "self_intro_advice": "建议围绕“数学与编程基础 + AI 应用项目 + 求职场景理解”展开，突出你能把大模型能力落到具体应用场景中。"
+    }
+
+
+def load_demo_data():
+    """
+    一键加载作品集演示数据。
+    使用虚拟简历、虚拟岗位和虚拟分析结果，不包含任何真实个人信息。
+    """
+    clear_demo_data()
+
+    demo_resume_text = build_demo_resume_text()
+
+    resume_id = add_resume(
+        file_name="[演示] 李明_AI应用开发实习_示例简历.docx",
+        file_type="docx",
+        resume_text=demo_resume_text,
+        set_active=True
+    )
+
+    st.session_state.resume_id = resume_id
+    st.session_state.resume_text = demo_resume_text
+    st.session_state.resume_file_name = "[演示] 李明_AI应用开发实习_示例简历.docx"
+    st.session_state.resume_char_count = len(demo_resume_text)
+    st.session_state.resume_uploader_version += 1
+    st.session_state.last_uploaded_resume_key = ""
+
+    demo_jobs = [
+        {
+            "job_name": "[演示] AI应用开发实习生",
+            "company": "云舟科技",
+            "city": "杭州",
+            "status": "待投递",
+            "score": 82,
+            "level": "较高",
+            "summary": "候选人与岗位整体匹配度较高，具备 Python、Streamlit、大模型 API 调用和完整 AI 应用项目经验，适合优先投递。",
+            "keywords": ["Python", "Streamlit", "LLM API", "Prompt", "AI 应用开发"],
+            "jd_text": """
+岗位名称：AI应用开发实习生
+公司名称：云舟科技
+城市：杭州
+
+岗位职责：
+- 参与 AI 应用原型开发
+- 调用大模型 API 完成文本分析、问答和内容生成
+- 使用 Streamlit 或 FastAPI 搭建内部工具
+- 协助优化 Prompt 和结构化输出效果
+
+岗位要求：
+- 熟悉 Python
+- 了解大模型 API 调用
+- 有 AI 应用项目经验
+- 了解基本数据库使用
+"""
+        },
+        {
+            "job_name": "[演示] RAG应用开发实习生",
+            "company": "星河智能",
+            "city": "上海",
+            "status": "已投递",
+            "score": 76,
+            "level": "中等",
+            "summary": "候选人具备 RAG 基础理解和大模型应用经验，但向量数据库和检索评估经验还可以进一步补充。",
+            "keywords": ["RAG", "Embedding", "向量检索", "Python", "LLM"],
+            "jd_text": """
+岗位名称：RAG应用开发实习生
+公司名称：星河智能
+城市：上海
+
+岗位职责：
+- 参与企业知识库问答系统开发
+- 负责文档解析、文本切分、向量检索和答案生成
+- 优化 Prompt，提高问答准确率
+
+岗位要求：
+- 熟悉 Python
+- 了解 RAG 基本流程
+- 了解 Embedding 和向量数据库
+- 有大模型应用项目经验
+"""
+        },
+        {
+            "job_name": "[演示] 大模型产品实习生",
+            "company": "青禾AI",
+            "city": "北京",
+            "status": "面试",
+            "score": 71,
+            "level": "中等",
+            "summary": "候选人具备 AI 应用项目经验和一定产品理解，但需要进一步加强产品分析、用户需求拆解和指标设计表达。",
+            "keywords": ["大模型产品", "需求分析", "AI 工具", "Prompt", "用户场景"],
+            "jd_text": """
+岗位名称：大模型产品实习生
+公司名称：青禾AI
+城市：北京
+
+岗位职责：
+- 参与大模型产品需求分析
+- 协助设计 AI 工具功能流程
+- 整理用户反馈并推动产品优化
+- 与研发协作完成 AI 功能落地
+
+岗位要求：
+- 理解大模型应用场景
+- 有 AI 工具或产品项目经验
+- 具备较好的沟通和文档能力
+"""
+        }
+    ]
+
+    first_job_id = None
+    first_job_name = ""
+
+    for index, demo_job in enumerate(demo_jobs):
+        job_id = add_job(
+            job_name=demo_job["job_name"],
+            company=demo_job["company"],
+            city=demo_job["city"],
+            source="演示数据",
+            job_url="",
+            jd_text=demo_job["jd_text"],
+            status=demo_job["status"],
+            note="[DEMO_DATA] 作品集演示岗位"
+        )
+
+        update_job_match_result(
+            job_id=job_id,
+            match_score=demo_job["score"],
+            match_level=demo_job["level"]
+        )
+
+        demo_result = build_demo_analysis_result(
+            score=demo_job["score"],
+            summary=demo_job["summary"],
+            position_keywords=demo_job["keywords"]
+        )
+
+        save_analysis_result(
+            job_id=job_id,
+            job_name=demo_job["job_name"],
+            company=demo_job["company"],
+            match_score=demo_job["score"],
+            match_level=demo_job["level"],
+            summary=demo_job["summary"],
+            result=demo_result
+        )
+
+        if index == 0:
+            first_job_id = job_id
+            first_job_name = demo_job["job_name"]
+
+    st.session_state.current_job_id = first_job_id
+    st.session_state.current_job_name = first_job_name
+    st.session_state.single_result = None
+    st.session_state.multi_results = []
+    st.session_state.import_feedback = "演示数据已加载。现在可以在工作台、岗位库和求职看板中查看完整演示效果。"
+
+
+def reset_demo_data_in_app():
+    """
+    清空演示数据，并重置当前页面状态。
+    """
+    clear_demo_data()
+
+    st.session_state.resume_id = None
+    st.session_state.resume_text = ""
+    st.session_state.resume_file_name = ""
+    st.session_state.resume_char_count = 0
+    st.session_state.resume_uploader_version += 1
+    st.session_state.last_uploaded_resume_key = ""
+
+    st.session_state.current_job_id = None
+    st.session_state.current_job_name = ""
+    st.session_state.single_result = None
+    st.session_state.multi_results = []
+
+    st.session_state.import_feedback = "演示数据已清空。"
+
+def render_demo_tools():
+    with st.expander("演示模式", expanded=False):
+        st.caption("用于作品集展示。加载虚拟简历、虚拟岗位和虚拟分析结果，不包含真实个人信息。")
+
+        if st.button("加载演示数据", use_container_width=True):
+            load_demo_data()
+            st.rerun()
+
+        if st.button("清空演示数据", use_container_width=True):
+            reset_demo_data_in_app()
+            st.rerun()
 
 
 def normalize_text(text: str) -> str:
@@ -1038,6 +1335,144 @@ def render_workbench():
 # 岗位库
 # =========================
 
+def render_interview_module(job):
+    job_id = job.get("id")
+
+    st.markdown("### 面试记录")
+
+    st.caption("记录这个岗位的面试内容、反馈和结果，用于后续判断下一步应该做什么。")
+
+    with st.expander("新增面试记录", expanded=False):
+        c1, c2, c3 = st.columns(3)
+
+        with c1:
+            round_name = st.selectbox(
+                "面试轮次",
+                ["一面", "二面", "三面", "HR面", "终面", "其他"],
+                key=f"interview_round_{job_id}"
+            )
+
+        with c2:
+            interview_type = st.selectbox(
+                "面试类型",
+                ["技术面", "业务面", "HR面", "综合面", "其他"],
+                key=f"interview_type_{job_id}"
+            )
+
+        with c3:
+            result = st.selectbox(
+                "面试结果",
+                ["待反馈", "通过", "进入下一轮", "未通过", "Offer"],
+                key=f"interview_result_{job_id}"
+            )
+
+        interview_time = st.text_input(
+            "面试时间",
+            placeholder="例如：2026-06-15 14:00",
+            key=f"interview_time_{job_id}"
+        )
+
+        interview_content = st.text_area(
+            "面试内容",
+            placeholder="记录面试官问了什么，例如：自我介绍、项目细节、PyTorch、RAG、优化算法等。",
+            height=120,
+            key=f"interview_content_{job_id}"
+        )
+
+        feedback = st.text_area(
+            "面试反馈 / 自我复盘",
+            placeholder="记录面试官反馈，或者你自己的复盘：哪里答得好，哪里没有答好。",
+            height=120,
+            key=f"interview_feedback_{job_id}"
+        )
+
+        next_step = st.text_area(
+            "下一步计划",
+            placeholder="例如：准备二面、补充项目表达、复习深度学习基础、等待 HR 反馈。",
+            height=100,
+            key=f"interview_next_step_{job_id}"
+        )
+
+        note = st.text_area(
+            "备注",
+            placeholder="其他补充信息。",
+            height=80,
+            key=f"interview_note_{job_id}"
+        )
+
+        if st.button(
+            "保存面试记录",
+            type="primary",
+            use_container_width=True,
+            key=f"save_interview_{job_id}"
+        ):
+            add_interview_record(
+                job_id=job_id,
+                round_name=round_name,
+                interview_time=interview_time,
+                interview_type=interview_type,
+                interview_content=interview_content,
+                feedback=feedback,
+                result=result,
+                next_step=next_step,
+                note=note
+            )
+
+            if result in ["待反馈", "通过", "进入下一轮"]:
+                update_job_status(job_id, "面试")
+
+            elif result == "Offer":
+                update_job_status(job_id, "Offer")
+
+            elif result == "未通过":
+                update_job_status(job_id, "已拒绝")
+
+            st.success("面试记录已保存。")
+            st.rerun()
+
+    interviews = get_interviews_by_job(job_id)
+
+    if not interviews:
+        st.info("暂无面试记录。")
+        return
+
+    st.markdown("#### 历史面试记录")
+
+    for interview in interviews:
+        interview_id = interview.get("id")
+
+        with st.expander(
+            f"{interview.get('round_name', '面试')}｜"
+            f"{interview.get('interview_type', '')}｜"
+            f"{interview.get('result', '')}｜"
+            f"{interview.get('created_at', '')}"
+        ):
+            st.markdown(f"**面试时间：** {interview.get('interview_time') or '未填写'}")
+            st.markdown(f"**面试类型：** {interview.get('interview_type') or '未填写'}")
+            st.markdown(f"**面试结果：** {interview.get('result') or '未填写'}")
+
+            st.markdown("**面试内容：**")
+            st.write(interview.get("interview_content") or "未填写")
+
+            st.markdown("**面试反馈 / 自我复盘：**")
+            st.write(interview.get("feedback") or "未填写")
+
+            st.markdown("**下一步计划：**")
+            st.write(interview.get("next_step") or "未填写")
+
+            st.markdown("**备注：**")
+            st.write(interview.get("note") or "未填写")
+
+            if st.button(
+                "删除这条面试记录",
+                key=f"delete_interview_{interview_id}",
+                use_container_width=True
+            ):
+                delete_interview_record(interview_id)
+                st.success("面试记录已删除。")
+                st.rerun()
+
+
 def render_job_library():
     st.subheader("岗位库")
     st.caption("所有在工作台上传或保存过的岗位都会出现在这里。")
@@ -1145,6 +1580,9 @@ def render_job_library():
     with st.expander("查看岗位 JD"):
         st.write(job.get("jd_text", ""))
 
+    st.divider()
+    render_interview_module(job)
+
 
 # =========================
 # 求职看板
@@ -1173,6 +1611,31 @@ def render_dashboard():
         status = get_status(job)
         score = job.get("match_score")
 
+        latest_interview = get_latest_interview_by_job(job.get("id"))
+
+        if latest_interview:
+            result = latest_interview.get("result") or "待反馈"
+            feedback = latest_interview.get("feedback") or ""
+            next_step = latest_interview.get("next_step") or ""
+
+            if result == "待反馈":
+                if feedback.strip():
+                    return "已有面试复盘，建议整理重点问题，并准备 3～5 天后跟进反馈。"
+                return "面试后暂无反馈，建议先补充面试内容和自我复盘，再准备跟进。"
+
+            if result in ["通过", "进入下一轮"]:
+                if next_step.strip():
+                    return next_step
+                return "面试已通过，建议准备下一轮面试材料和项目表达。"
+
+            if result == "未通过":
+                if feedback.strip():
+                    return "根据面试反馈复盘问题，提炼简历和项目表达中的短板。"
+                return "面试未通过，建议补充失败原因和面试反馈，用于后续复盘。"
+
+            if result == "Offer":
+                return "已拿到 Offer，建议比较薪资、城市、成长性、稳定性和入职时间。"
+
         if status == "待分析":
             return "先完成岗位匹配分析，判断这个岗位是否值得继续投递。"
 
@@ -1188,7 +1651,7 @@ def render_dashboard():
             return "集中准备笔试内容，复习算法、深度学习基础和岗位关键词。"
 
         if status == "面试":
-            return "重点准备自我介绍、项目表达、项目难点和岗位相关技术问题。"
+            return "补充面试内容、反馈和结果，这样系统才能给出更准确的下一步建议。"
 
         if status == "Offer":
             return "比较城市、薪资、成长性、稳定性和入职时间，准备做选择。"
@@ -1367,7 +1830,7 @@ with st.sidebar:
 
     st.divider()
 
-    st.markdown("**当前版本：v6-product-ui**")
+    st.markdown("**当前版本：v7-interview-tracking**")
 
     if st.session_state.resume_text:
         st.info(f"当前简历：{st.session_state.get('resume_file_name', '')}")
@@ -1382,6 +1845,8 @@ with st.sidebar:
         st.warning("当前未选择岗位")
 
     st.warning("请勿在公开部署环境上传包含敏感隐私信息的简历。")
+
+    render_demo_tools()
 
 tab_workbench, tab_jobs, tab_dashboard = st.tabs(
     [
