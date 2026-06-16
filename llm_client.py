@@ -1,6 +1,8 @@
 import os
 import json
 import re
+
+import streamlit as st
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -12,13 +14,22 @@ from prompt_templates import (
 
 load_dotenv()
 
+def get_config(name: str, default: str = ""):
+    try:
+        if name in st.secrets:
+            return st.secrets[name]
+    except Exception:
+        pass
+
+    return os.getenv(name, default)
+
 
 def get_client() -> OpenAI:
     """
     创建 DeepSeek / OpenAI 兼容客户端。
     """
-    api_key = os.getenv("OPENAI_API_KEY")
-    base_url = os.getenv("OPENAI_BASE_URL")
+    api_key = get_config("OPENAI_API_KEY")
+    base_url = get_config("OPENAI_BASE_URL", "https://api.deepseek.com")
 
     if not api_key:
         raise ValueError("未检测到 OPENAI_API_KEY，请检查 .env 文件。")
@@ -71,7 +82,7 @@ def analyze_resume_jd(resume_text: str, jd_text: str) -> dict:
     """
     client = get_client()
 
-    model_name = os.getenv("OPENAI_MODEL", "deepseek-chat")
+    model_name = get_config("OPENAI_MODEL", "deepseek-chat")
 
     prompt = (
         RESUME_JD_ANALYSIS_PROMPT
@@ -104,7 +115,7 @@ def extract_job_from_jd(raw_jd: str) -> dict:
     """
     client = get_client()
 
-    model_name = os.getenv("OPENAI_MODEL", "deepseek-chat")
+    model_name = get_config("OPENAI_MODEL", "deepseek-chat")
 
     prompt = JOB_JD_EXTRACTION_PROMPT.replace(
         "{raw_jd}",
